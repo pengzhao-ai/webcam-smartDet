@@ -1,0 +1,1235 @@
+<!DOCTYPE html>
+<html lang="en" class="theme-light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Webcam Smart Detection — two detectors, one output contract</title>
+  <meta name="description" content="A real-time webcam pipeline that finds objects and faces in the same frame. Both detectors publish an identical result, so the render loop never learns which one produced a box.">
+
+  <!-- Adds .js so scroll-reveal CSS only hides content when JS can unhide it.
+       Without this, a blocked CDN leaves the page blank below the hero. -->
+  <script>document.documentElement.classList.add('js');</script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <!-- Data lives in a .js file, not .json: fetch() is blocked over file:// by CORS. -->
+  <script src="assets/data.js"></script>
+  <script>Chart.defaults.animation = false;</script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { interpolate-size: allow-keywords; }
+
+    /* ===== THEMES — class-based ONLY, never a prefers-color-scheme media query ===== */
+    html.theme-dark {
+      --bg: #0A0A0A; --surface: #141414; --surface-hover: #1C1C1C;
+      --border: rgba(255,255,255,0.09);
+      --text: #EDEDED; --text-secondary: #9CA3AF;
+      --accent: #3b82f6; --accent-secondary: #8b5cf6;
+      --positive: #10b981; --negative: #f43f5e; --warning: #f59e0b;
+      --flow-line: rgba(255,255,255,0.28);
+    }
+    html.theme-light {
+      --bg: #FAFAF9; --surface: #FFFFFF; --surface-hover: #F5F5F4;
+      --border: rgba(0,0,0,0.09);
+      --text: #0f172a; --text-secondary: #64748b;
+      --accent: #2563eb; --accent-secondary: #7c3aed;
+      --positive: #059669; --negative: #e11d48; --warning: #d97706;
+      --flow-line: rgba(15,23,42,0.28);
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg); color: var(--text);
+      line-height: 1.6; -webkit-font-smoothing: antialiased;
+      letter-spacing: -0.01em;
+      transition: background 0.3s, color 0.3s;
+      scrollbar-gutter: stable;
+    }
+    h1,h2,h3,h4 { color: var(--text); letter-spacing: -0.03em; line-height: 1.15; text-wrap: balance; }
+    h1 { font-weight: 800; font-size: clamp(2.5rem, 5vw, 3.5rem); }
+    h2 { font-weight: 700; font-size: 2rem; }
+    h3 { font-weight: 600; font-size: 1.5rem; }
+    body, p, li, td, th, span, label { font-weight: 400; }
+    p, li, td, th { color: var(--text); }
+    a { color: var(--accent); }
+    .text-secondary { color: var(--text-secondary); }
+
+    .wrap { max-width: 1040px; margin: 0 auto; padding: 0 24px; }
+    section { margin-bottom: 72px; }
+    section > h2 { margin-bottom: 20px; }
+
+    .eyebrow {
+      display: block; font-size: 0.75rem; font-weight: 700;
+      letter-spacing: 0.09em; text-transform: uppercase;
+      color: var(--text-secondary); margin-bottom: 10px;
+    }
+
+    .badges { display: flex; flex-wrap: wrap; gap: 8px; margin: 24px 0 0; list-style: none; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 999px; padding: 6px 14px;
+      font-size: 0.8125rem; font-weight: 500; color: var(--text-secondary);
+    }
+    .badge strong { color: var(--text); font-weight: 600; }
+
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 8px; padding: 24px;
+      transition: box-shadow 0.2s ease;
+    }
+    .card:hover { box-shadow: 0 0 0 1px var(--border), 0 8px 16px rgba(0,0,0,0.08); }
+
+    .hero { padding: 96px 0 8px; }
+    .hero p.lede { font-size: 1.125rem; color: var(--text-secondary); max-width: 62ch; margin-top: 16px; }
+    .hero-links { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 28px; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: var(--accent); color: #fff; text-decoration: none;
+      padding: 11px 20px; border-radius: 8px; font-weight: 600; font-size: 0.9375rem;
+      transition: opacity 0.2s;
+    }
+    .btn:hover { opacity: 0.88; }
+    .btn.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+
+    /* Stat row — the four numbers the page is built on, each traceable to a run. */
+    .stats {
+      display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px; margin-top: 36px; list-style: none;
+    }
+    .stat {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 10px; padding: 18px 20px; min-width: 0;
+    }
+    .stat .n {
+      display: block; font-size: 1.75rem; font-weight: 700;
+      letter-spacing: -0.03em; font-variant-numeric: tabular-nums;
+    }
+    .stat .k { display: block; font-size: 0.8125rem; color: var(--text-secondary); margin-top: 2px; }
+
+    .verdict {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 0.75rem; font-weight: 700; letter-spacing: 0.04em;
+      text-transform: uppercase; padding: 4px 10px; border-radius: 999px;
+    }
+    .verdict.pass { background: color-mix(in srgb, var(--positive) 15%, transparent); color: var(--positive); }
+    .verdict.fail { background: color-mix(in srgb, var(--negative) 15%, transparent); color: var(--negative); }
+    .verdict.note { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+
+    figure { margin: 0 0 32px; }
+    figure img {
+      width: 100%; max-width: 100%; height: auto; display: block;
+      border: 1px solid var(--border); border-radius: 8px; background: #fff;
+    }
+    figcaption { margin-top: 12px; font-size: 0.9375rem; color: var(--text-secondary); }
+    figcaption strong { color: var(--text); font-weight: 600; }
+    .fig-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; }
+    .fig-grid figure { margin-bottom: 0; min-width: 0; }
+
+    /* ===== DATA-FLOW DIAGRAM =====
+       Built from DOM nodes rather than one wide SVG: an SVG that had to fit the
+       fork and the merge on one line would scale to ~0.37 at 360px and render
+       its labels at 6px. This reflows to a column instead. */
+    .flow {
+      display: flex; align-items: center; margin: 24px 0 14px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 20px 18px;
+    }
+    .flow-node {
+      flex: 1 1 0; min-width: 0;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+      padding: 14px 16px; display: flex; flex-direction: column; gap: 3px;
+    }
+    .flow-node strong { font-size: 0.9375rem; font-weight: 600; }
+    .flow-src {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.6875rem; color: var(--text-secondary);
+    }
+    .flow-detail { font-size: 0.8125rem; color: var(--text-secondary); }
+    .flow-split { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+    .flow-arrow {
+      flex: 0 0 72px; position: relative;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .flow-arrow::before {
+      content: ''; position: absolute; left: 0; right: 0; top: 50%;
+      height: 1.5px; background: var(--flow-line);
+    }
+    .flow-arrow::after {
+      content: ''; position: absolute; right: 6px; top: 50%;
+      width: 7px; height: 7px; border-top: 1.5px solid var(--flow-line);
+      border-right: 1.5px solid var(--flow-line);
+      transform: translateY(-50%) rotate(45deg);
+    }
+    .flow-arrow span {
+      position: relative; background: var(--surface); padding: 0 8px;
+      font-size: 0.6875rem; color: var(--text-secondary); white-space: nowrap;
+    }
+
+    .table-scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9375rem; min-width: 520px; }
+    th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); }
+    th { font-weight: 600; font-size: 0.8125rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-secondary); }
+    tbody tr:last-child td { border-bottom: none; }
+    td.num { font-variant-numeric: tabular-nums; }
+
+    .chart-container {
+      height: 380px; padding: 20px; border-radius: 12px;
+      background: var(--surface); border: 1px solid var(--border);
+      position: relative;
+    }
+    .chart-block { margin-bottom: 48px; }
+    .chart-block h3 { margin-bottom: 6px; font-size: 1.125rem; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .chart-note { font-size: 0.9375rem; color: var(--text-secondary); margin-bottom: 14px; max-width: 72ch; }
+    .method {
+      margin-top: 14px; font-size: 0.8125rem; color: var(--text-secondary);
+      border-left: 2px solid var(--border); padding-left: 14px; max-width: 72ch;
+    }
+
+    .snippet { position: relative; margin-bottom: 20px; }
+    .snippet-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+    .snippet-head h3 { font-size: 1rem; }
+    .copy-btn {
+      background: var(--surface); color: var(--text); border: 1px solid var(--border);
+      border-radius: 6px; padding: 6px 14px; font-size: 0.8125rem;
+      font-family: inherit; font-weight: 600; cursor: pointer; min-width: 96px;
+      transition: background 0.15s;
+    }
+    .copy-btn:hover { background: var(--surface-hover); }
+    pre {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+      padding: 18px 20px; overflow-x: auto; font-size: 0.875rem; line-height: 1.65;
+    }
+    code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+    :not(pre) > code { background: var(--surface-hover); padding: 2px 6px; border-radius: 4px; font-size: 0.875em; }
+    kbd {
+      font-family: inherit; font-size: 0.8125em; font-weight: 600;
+      background: var(--surface-hover); border: 1px solid var(--border);
+      border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px;
+    }
+
+    /* Each of the four core modules gets one of these. */
+    .module { margin-bottom: 44px; }
+    .module-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+    .module-head h3 { font-size: 1.25rem; }
+    .module-head .path {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.8125rem; color: var(--text-secondary);
+    }
+    .module > p { max-width: 72ch; margin-bottom: 16px; }
+    .module > p + p { margin-top: -8px; }
+
+    .finding { border-left: 3px solid var(--negative); padding-left: 20px; margin-bottom: 28px; }
+    .finding.good { border-left-color: var(--positive); }
+    .finding h3 { font-size: 1.0625rem; margin-bottom: 6px; }
+    .finding p { font-size: 0.9375rem; color: var(--text-secondary); }
+    /* Scope to the class, not to a container — an over-scoped selector silently
+       loses white-space:pre and collapses the alignment. */
+    .evidence {
+      margin-top: 10px; font-size: 0.8125rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--surface-hover); padding: 10px 14px; border-radius: 6px;
+      color: var(--text); overflow-x: auto; white-space: pre;
+    }
+
+    @keyframes fadeInUp { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
+    .animate { animation: fadeInUp 0.6s ease-out both; }
+    .animate.delay-1 { animation-delay: 0.1s; }
+    .animate.delay-2 { animation-delay: 0.2s; }
+    .animate.delay-3 { animation-delay: 0.3s; }
+
+    /* Gated behind .js so a blocked CDN never leaves the page blank. */
+    .js .reveal { opacity: 0; transform: translateY(24px); transition: opacity 0.6s ease, transform 0.6s ease; }
+    .js .reveal.visible { opacity: 1; transform: translateY(0); }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+      /* !important required: .js .reveal outranks a bare .reveal */
+      .js .reveal { opacity: 1 !important; transform: none !important; }
+    }
+
+    @media print {
+      body { background: white !important; color: black !important; }
+      .viz-menu, .copy-btn { display: none !important; }
+      .js .reveal { opacity: 1 !important; transform: none !important; }
+      .card, figure, .chart-block { break-inside: avoid; }
+      * { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+    }
+
+    .viz-menu { position: fixed; top: 16px; right: 16px; z-index: 9999; }
+    .viz-menu-toggle {
+      width: 44px; height: 44px; border-radius: 12px;
+      background: var(--surface); border: 1px solid var(--border);
+      color: var(--text); cursor: pointer; display: flex;
+      align-items: center; justify-content: center;
+      backdrop-filter: blur(12px); transition: background 0.2s;
+    }
+    .viz-menu-toggle:hover { background: var(--surface-hover); }
+    .viz-menu-dropdown {
+      position: absolute; top: 52px; right: 0; min-width: 200px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 8px;
+      opacity: 0; visibility: hidden; transform: translateY(-8px);
+      transition: all 0.2s; backdrop-filter: blur(16px);
+    }
+    .viz-menu-dropdown.open { opacity: 1; visibility: visible; transform: translateY(0); }
+    .viz-menu-dropdown button {
+      width: 100%; padding: 10px 14px; border: none; border-radius: 8px;
+      background: transparent; color: var(--text); font-size: 14px;
+      font-family: inherit; cursor: pointer; text-align: left;
+      display: flex; align-items: center; gap: 10px; transition: background 0.15s;
+    }
+    .viz-menu-dropdown button:hover { background: var(--surface-hover); }
+
+    .skip-to-content {
+      position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; overflow: hidden;
+      background: var(--accent); color: #fff; padding: 10px 18px;
+      text-decoration: none; border-radius: 6px; z-index: 10000;
+    }
+    .skip-to-content:focus { position: fixed; left: 16px; top: 16px; width: auto; height: auto; }
+
+    footer { border-top: 1px solid var(--border); padding: 40px 0 64px; margin-top: 24px; }
+    footer p { font-size: 0.875rem; color: var(--text-secondary); }
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    @media (max-width: 900px) {
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .fig-grid { grid-template-columns: minmax(0, 1fr); }
+    }
+    @media (max-width: 768px) {
+      .wrap { padding: 0 18px; }
+      .hero { padding: 72px 0 8px; }
+      section { margin-bottom: 56px; }
+      .chart-container { height: 340px; padding: 12px; }
+      .flow { flex-direction: column; padding: 16px 14px; }
+      .flow-arrow { flex: 0 0 58px; }
+      .flow-arrow::before { left: 50%; right: auto; top: 0; bottom: 0; width: 1.5px; height: auto; }
+      .flow-arrow::after {
+        right: auto; left: 50%; top: auto; bottom: 8px;
+        transform: translateX(-50%) rotate(135deg);
+      }
+    }
+    @media (max-width: 375px) {
+      .chart-container { height: 300px; }
+      h1 { font-size: 2.5rem; }
+      .wrap { padding: 0 14px; }
+      .stats { grid-template-columns: minmax(0, 1fr); }
+      .flow-arrow span { font-size: 0.625rem; }
+    }
+  </style>
+</head>
+<body>
+  <a href="#main-content" class="skip-to-content">Skip to content</a>
+
+  <div class="viz-menu">
+    <button class="viz-menu-toggle" onclick="toggleMenu()" aria-label="Menu">
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+        <line x1="3" y1="5" x2="17" y2="5"/><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="15" x2="17" y2="15"/>
+      </svg>
+    </button>
+    <div class="viz-menu-dropdown" id="vizMenuDropdown">
+      <button onclick="cycleTheme()"><span id="themeIcon">☀️</span><span id="themeLabel">Light</span></button>
+      <button onclick="window.print()"><span>🖨️</span><span>Print / PDF</span></button>
+    </div>
+  </div>
+
+  <main id="main-content" role="main">
+    <div class="wrap">
+
+      <!-- ============ HERO ============ -->
+      <header class="hero">
+        <h1 class="animate">Webcam Smart Detection</h1>
+        <p class="lede animate delay-1">
+          A real-time webcam pipeline that finds objects and faces in the same frame and draws
+          them the same way. The two detectors share no code, no model format and no mathematics —
+          but they publish an <strong>identical four-key result</strong>, so the loop that renders
+          them never learns which one produced a box. 448 lines of Python, four modules,
+          CPU-only, no training.
+        </p>
+        <div class="hero-links animate delay-2">
+          <a class="btn" href="https://github.com/pengzhao-ai/webcam-smartDet">View on GitHub</a>
+          <a class="btn secondary" href="#architecture">How it fits together</a>
+        </div>
+        <ul class="badges animate delay-3">
+          <li class="badge">Python <strong>3.8+</strong></li>
+          <li class="badge"><strong>YOLOv8</strong> objects</li>
+          <li class="badge"><strong>OpenCV</strong> Haar faces</li>
+          <li class="badge">License: <strong>GPL-2.0</strong></li>
+        </ul>
+
+        <ul class="stats animate delay-3">
+          <li class="stat"><span class="n">448</span><span class="k">lines across the four core modules</span></li>
+          <li class="stat"><span class="n">2</span><span class="k">detectors, one output contract</span></li>
+          <li class="stat"><span class="n">4</span><span class="k">YOLOv8 checkpoints measured here</span></li>
+          <li class="stat"><span class="n">34.2<span style="font-size:1rem;font-weight:500"> ms</span></span><span class="k">median YOLOv8n inference, CPU</span></li>
+        </ul>
+      </header>
+
+      <!-- ============ OVERVIEW ============ -->
+      <section id="overview" class="reveal" data-reveal>
+        <span class="eyebrow">The problem</span>
+        <h2>Three jobs, one deadline</h2>
+        <p class="text-secondary" style="max-width:72ch">
+          A webcam detection loop looks like it should be a dozen lines: read a frame, run a model,
+          draw the boxes. What makes it a system is that three jobs share a single frame deadline —
+          <strong style="color:var(--text)">capture, inference and display</strong> — and one of
+          them is far more expensive than the other two. On the machine measured below, a single
+          YOLOv8n inference takes 34.2&nbsp;ms; grabbing a frame and drawing a handful of boxes are
+          rounding errors beside it. Miss the deadline and the window stutters, so most of the
+          decisions in this codebase are about when that one call is allowed to happen.
+        </p>
+        <p class="text-secondary" style="max-width:72ch;margin-top:16px">
+          The second problem is variety. Objects and faces are found by two techniques that have
+          almost nothing in common: a convolutional network trained to recognise 80 COCO classes,
+          and a boosted cascade of Haar-like features — an approach that predates the modern
+          deep-learning stack by most of a decade. Wiring each one straight into the display loop
+          would mean two loops and two drawing routines, and a third as soon as you wanted both at
+          once. So instead they are given a common interface, and everything downstream is written
+          against that.
+        </p>
+      </section>
+
+      <!-- ============ ARCHITECTURE ============ -->
+      <section id="architecture" class="reveal" data-reveal>
+        <span class="eyebrow">Architecture</span>
+        <h2>The shape of the pipeline</h2>
+
+        <div class="flow" role="img" aria-label="Data flow diagram. CameraHandler reads a frame and passes it to ObjectDetector or FaceDetector, or both. Both return a list of dictionaries with the same four keys. Those detections are drawn onto the frame by draw_detections or draw_faces, and the annotated frame is then shown with imshow or written to disk with VideoWriter.">
+          <div class="flow-node">
+            <span class="flow-src">camera_handler.py</span>
+            <strong>CameraHandler</strong>
+            <span class="flow-detail">640 × 480 @ 30 fps</span>
+          </div>
+          <div class="flow-arrow" aria-hidden="true"><span>frame</span></div>
+          <div class="flow-split">
+            <div class="flow-node">
+              <span class="flow-src">object_detector.py</span>
+              <strong>ObjectDetector</strong>
+              <span class="flow-detail">YOLOv8 · 80 classes</span>
+            </div>
+            <div class="flow-node">
+              <span class="flow-src">face_detector.py</span>
+              <strong>FaceDetector</strong>
+              <span class="flow-detail">Haar cascade · frontal faces</span>
+            </div>
+          </div>
+          <div class="flow-arrow" aria-hidden="true"><span>same shape</span></div>
+          <div class="flow-node">
+            <span class="flow-src">draw_detections / draw_faces</span>
+            <strong>annotate</strong>
+            <span class="flow-detail">boxes, labels, no model</span>
+          </div>
+          <div class="flow-arrow" aria-hidden="true"><span>frame</span></div>
+          <div class="flow-node">
+            <span class="flow-src">cv2</span>
+            <strong>imshow / VideoWriter</strong>
+            <span class="flow-detail">display or record</span>
+          </div>
+        </div>
+        <p class="text-secondary" style="max-width:72ch;margin-bottom:28px">
+          <strong style="color:var(--text)">What to notice:</strong> the two middle boxes share
+          nothing internally, yet everything to their right is written once and never branches on
+          which detector ran. That only holds because both return the same four keys. The main
+          application wires one detector; <code>examples/combined_detection_demo.py</code> wires
+          both on the same frame. Neither the camera code nor the drawing code changes between
+          those two programs.
+        </p>
+
+        <h3 style="font-size:1.25rem;margin-bottom:8px">The contract</h3>
+        <p class="text-secondary" style="max-width:72ch;margin-bottom:16px">
+          Every detection, from either detector, is a dictionary with these four keys. This is the
+          whole interface — it is what makes the two detectors interchangeable, and it is what the
+          drawing code is allowed to assume.
+        </p>
+        <div class="snippet">
+          <div class="snippet-head">
+            <h3>One detection</h3>
+            <button class="copy-btn" onclick="copySnippet(this)">Copy</button>
+          </div>
+          <pre><code>{
+    "bbox":       [x1, y1, x2, y2],   # pixel corners, ints
+    "confidence": 0.87,               # float
+    "class_id":   67,                 # int
+    "class_name": "cell phone",       # str, used as the label
+}</code></pre>
+        </div>
+
+        <div class="finding good">
+          <h3>Why an explicit contract rather than duck typing</h3>
+          <p>
+            Both draw routines index the same keys by name — <code>detection["bbox"]</code>,
+            <code>detection["class_name"]</code> — so a detector that returns a differently-shaped
+            object fails loudly at the first drawn box rather than silently producing an empty
+            overlay. It also means the two detectors can be selected at the call site
+            (<code>examples/combined_detection_demo.py</code>) instead of being baked into the
+            application class.
+          </p>
+        </div>
+      </section>
+
+      <!-- ============ HOW IT WORKS ============ -->
+      <section id="how-it-works" class="reveal" data-reveal>
+        <span class="eyebrow">Implementation</span>
+        <h2>How each piece works</h2>
+        <p class="text-secondary" style="max-width:72ch;margin-bottom:36px">
+          Four modules, each with one job. The interesting decisions are in what they refuse to
+          assume.
+        </p>
+
+        <div class="module">
+          <div class="module-head">
+            <h3>CameraHandler</h3>
+            <span class="path">src/camera_handler.py · 80 lines</span>
+          </div>
+          <p class="text-secondary">
+            Opens the device, requests 640×480 at 30&nbsp;fps, and hands out frames. The one
+            non-obvious decision is that it never trusts those requested numbers.
+            <code>cv2.VideoCapture.set()</code> is a <em>request</em>: the driver is free to ignore
+            it and give you something else, and it will not tell you. So
+            <code>get_camera_info()</code> reads the properties back off the device after
+            negotiation, and the caller uses those.
+          </p>
+          <div class="snippet">
+            <div class="snippet-head">
+              <h3>Read back what the camera actually granted</h3>
+              <button class="copy-btn" onclick="copySnippet(this)">Copy</button>
+            </div>
+            <pre><code>self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+self.cap.set(cv2.CAP_PROP_FPS, 30)
+# ... later, in the run loop:
+camera_info = self.camera_handler.get_camera_info()
+video_writer = cv2.VideoWriter(
+    output_path,
+    cv2.VideoWriter_fourcc(*"XVID"),
+    camera_info.get("fps", 30),
+    (camera_info.get("width", 640), camera_info.get("height", 480)),
+)</code></pre>
+          </div>
+          <p class="text-secondary" style="max-width:72ch">
+            This matters because <code>VideoWriter</code> is constructed with a frame size up
+            front and then encodes whatever it is handed. Give it the size you asked for rather
+            than the size you got, and it writes a file that plays back torn or refuses to open —
+            with no error at write time.
+          </p>
+        </div>
+
+        <div class="module">
+          <div class="module-head">
+            <h3>ObjectDetector</h3>
+            <span class="path">src/object_detector.py · 126 lines</span>
+          </div>
+          <p class="text-secondary">
+            Wraps Ultralytics YOLOv8. The device is chosen at construction time —
+            <code>cuda</code> if PyTorch can see a GPU, otherwise <code>cpu</code> — so the same
+            code runs on a laptop and on a CUDA box with no configuration. The confidence
+            threshold is passed <em>into</em> the model call rather than used to filter the results
+            afterwards, which keeps low-scoring candidates out of the non-maximum-suppression
+            stage instead of discarding them after it.
+          </p>
+          <div class="snippet">
+            <div class="snippet-head">
+              <h3>Device selection and inference</h3>
+              <button class="copy-btn" onclick="copySnippet(this)">Copy</button>
+            </div>
+            <pre><code>self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# ...
+results = self.model(frame, conf=self.confidence_threshold)
+
+for result in results:
+    for box in result.boxes:
+        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+        confidence = box.conf[0].cpu().numpy()
+        class_id = int(box.cls[0].cpu().numpy())
+        class_name = self.model.names[class_id]</code></pre>
+          </div>
+        </div>
+
+        <div class="module">
+          <div class="module-head">
+            <h3>FaceDetector</h3>
+            <span class="path">src/face_detector.py · 99 lines</span>
+          </div>
+          <p class="text-secondary">
+            Uses OpenCV's bundled frontal-face Haar cascade, which needs a single-channel image —
+            so the frame is converted to grayscale first and the boxes are mapped back onto the
+            colour frame. Three parameters govern the search, and the shipped values are the
+            subject of the first chart below.
+          </p>
+          <div class="snippet">
+            <div class="snippet-head">
+              <h3>The detection call</h3>
+              <button class="copy-btn" onclick="copySnippet(this)">Copy</button>
+            </div>
+            <pre><code>gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+faces = self.face_cascade.detectMultiScale(
+    gray,
+    scaleFactor=1.1,     # pyramid step between successive rescalings
+    minNeighbors=5,      # overlapping hits a region needs to survive
+    minSize=(30, 30),    # ignore anything smaller than this
+    flags=cv2.CASCADE_SCALE_IMAGE
+)
+
+for (x, y, w, h) in faces:
+    detection = {
+        'bbox': [int(x), int(y), int(x + w), int(y + h)],
+        'confidence': 0.9,  # Haar cascades don't provide confidence scores
+        'class_id': 0,
+        'class_name': 'face'
+    }</code></pre>
+          </div>
+          <p class="text-secondary" style="max-width:72ch">
+            A Haar cascade is a boosted sequence of yes/no rectangle comparisons and produces no
+            calibrated probability anywhere in its output, so <code>confidence</code> is assigned
+            a fixed value to keep the same four-key contract that <code>ObjectDetector</code>
+            returns — which is why this number is identical on every face this program reports.
+          </p>
+        </div>
+
+        <div class="module">
+          <div class="module-head">
+            <h3>SmartDetectionApp</h3>
+            <span class="path">src/smart_detection_app.py · 143 lines</span>
+          </div>
+          <p class="text-secondary">
+            Owns the loop and the lifetime of everything in it. Initialisation is all-or-nothing:
+            if the camera or the model fails to come up, <code>initialize()</code> returns
+            <code>False</code> and <code>run()</code> exits before entering the loop, so there is
+            no half-initialised state to guard against later. The camera, the window and the video
+            writer are all released in a <code>finally</code> block, which is what makes
+            <kbd>Ctrl</kbd>+<kbd>C</kbd> a clean exit rather than a leaked device handle.
+          </p>
+          <div class="snippet">
+            <div class="snippet-head">
+              <h3>The loop and its cleanup path</h3>
+              <button class="copy-btn" onclick="copySnippet(this)">Copy</button>
+            </div>
+            <pre><code>try:
+    while self.running:
+        ret, frame = self.camera_handler.read_frame()
+        if not ret:
+            logger.warning("Failed to read frame from camera")
+            break
+
+        detections = self.object_detector.detect_objects(frame)
+        if detections:
+            frame = self.object_detector.draw_detections(frame, detections)
+
+        if video_writer:
+            video_writer.write(frame)
+        if display_window:
+            cv2.imshow("Smart Detection", frame)
+            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                break
+
+        frame_count += 1
+        if frame_count % 30 == 0:
+            logger.info(f"FPS: {frame_count / (time.time() - start_time):.2f}")
+
+except KeyboardInterrupt:
+    logger.info("Application stopped by user")
+finally:
+    self.cleanup(video_writer)</code></pre>
+          </div>
+          <p class="text-secondary" style="max-width:72ch">
+            The frame counter is also the FPS meter: an average since start-up, logged every 30
+            frames. That is a deliberately cheap measurement — it needs no timer and no extra
+            state — but it is a cumulative mean, so it lags after a stall and settles rather than
+            recovering. The benchmark further down this page measures differently, and says so.
+          </p>
+        </div>
+      </section>
+
+      <!-- ============ RESULTS ============ -->
+      <section id="results" class="reveal" data-reveal>
+        <span class="eyebrow">Evidence</span>
+        <h2>It running</h2>
+        <p class="text-secondary" style="max-width:72ch;margin-bottom:28px">
+          The first two images are captured sessions — the application window, as used. The last
+          two were produced fresh by running this repository's own detectors over still frames, so
+          they can be regenerated at any time from the committed generator.
+        </p>
+
+        <div class="fig-grid">
+          <figure>
+            <img src="assets/demo-object-detection.png" alt="A captured application window showing a hand holding a smartphone. A green box is drawn around the phone with the label cell phone: 0.87.">
+            <figcaption><strong>Object detection, captured live.</strong> One phone in frame, one
+              box, labelled with the class and the score the model assigned it. The camera was
+              pointed at a desk; the chair and curtains behind it are not reported, because
+              nothing in them cleared the 0.5 confidence threshold.</figcaption>
+          </figure>
+
+          <figure>
+            <img src="assets/demo-face-detection.png" alt="A captured application window showing a white plush toy held in a hand. A blue box is drawn around it labelled face: 0.90. Text reads Objects: 0, Faces: 1.">
+            <figcaption><strong>Face detection, captured live — and a false positive.</strong>
+              This is a soft toy, and the cascade has boxed it. That is not a bug in the wiring: a
+              Haar cascade responds to the arrangement of light and dark rectangles it was trained
+              on — two dark ovals above a smaller one, on a pale rounded surface — and this toy has
+              exactly that. It is the clearest illustration on this page of why the fixed
+              <code>0.90</code> label carries no information about whether the detection is
+              right.</figcaption>
+          </figure>
+
+          <figure>
+            <img src="assets/pipeline-zidane-objects.png" alt="A photograph of two people on a football touchline with green bounding boxes drawn around each person and labels reading person: 0.84 and person: 0.82.">
+            <figcaption><strong>Object detection, regenerated.</strong> Two people, two boxes, from
+              <code>yolov8n.pt</code> at the default 0.5 threshold — drawn by
+              <code>ObjectDetector.draw_detections</code> rather than by any tool in the generator.
+              The boxes sit tightly on the torsos while both faces are partly out of frame, which
+              is the difference between this detector and the one on the left.</figcaption>
+          </figure>
+
+          <figure>
+            <img src="assets/pipeline-bus.png" alt="A street photograph showing a bus and several people. Green boxes mark a bus and people; blue boxes mark two faces.">
+            <figcaption><strong>Both detectors, one frame.</strong> Green boxes are YOLO objects,
+              blue boxes are cascade faces, drawn in the same pass over the same image. Notice the
+              blue boxes are only on the two large, forward-facing faces: the cascade finds the
+              people close to the camera and has nothing to say about the smaller, angled faces
+              further back. The two label colours are the only place in the codebase where it
+              matters which detector ran.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <!-- ============ BEHAVIOUR ============ -->
+      <section id="behaviour" class="reveal" data-reveal>
+        <span class="eyebrow">Measured behaviour</span>
+        <h2>How the two detectors actually respond</h2>
+        <p class="text-secondary" style="max-width:72ch;margin-bottom:32px">
+          Both charts below come from running this repository's own code. The generator that
+          produced them is committed at <code>tools/generate_showcase_assets.py</code>, and the
+          numbers it measured are in <code>docs/assets/data.js</code>.
+        </p>
+
+        <div class="chart-block">
+          <h3>Cascade sensitivity <span class="verdict note">Parameter behaviour</span></h3>
+          <p class="chart-note">
+            <code>scaleFactor</code> is the step between successive pyramid levels;
+            <code>minNeighbors</code> is how many overlapping hits a region needs before it
+            survives. Sweeping both over one still frame gives 30 measurements. Notice which
+            knob actually moves the answer: changing <code>scaleFactor</code> changes the count at
+            every <code>minNeighbors</code> setting, while <code>minNeighbors</code> changes it at
+            only three of the six. The response is not monotonic either — the count drops to 1
+            across the whole <code>scaleFactor</code>&nbsp;=&nbsp;1.20 column, then climbs back to
+            2 at 1.30 for <code>minNeighbors</code> 3 and 4 — because a coarser pyramid samples
+            fewer scales, and whether a given region is caught at all depends on whether one of the
+            sampled scales happens to land on it.
+          </p>
+          <div role="img" aria-label="Line chart of candidate regions returned against scaleFactor, with one line per minNeighbors setting from 3 to 8. The count is 3 at scaleFactor 1.05 for the lower minNeighbors settings, falls to 2 across 1.10 and 1.15 at every setting, drops to 1 across the whole 1.20 column, returns to 2 at 1.30 for minNeighbors 3 and 4, and falls to 1 at 1.50, reaching 0 at minNeighbors 8.">
+            <div class="chart-container"><canvas id="chartCascade"></canvas></div>
+          </div>
+          <p class="method">
+            <strong style="color:var(--text)">Method.</strong>
+            <span id="cascadeMethod">…</span>
+          </p>
+        </div>
+
+        <div class="chart-block">
+          <h3>What each checkpoint costs <span class="verdict pass">Linear fit, R² = 0.999</span></h3>
+          <p class="chart-note">
+            Four YOLOv8 checkpoints, same two frames, same machine. The larger models cost more, as
+            you would expect — but the surprise is the <em>shape</em> of the cost. A straight line
+            through these four points fits to within about 2.5&nbsp;ms, and that line does not pass
+            anywhere near the origin: it implies roughly <strong>22&nbsp;ms of work per call that
+            does not depend on which checkpoint is loaded</strong>. The largest model is 13.5× the
+            file size of the smallest but only 5.7× the latency, because the fixed part is shared.
+            That is the argument for the nano default in one line: at 34&nbsp;ms a frame, most of
+            what you are waiting for is not the network.
+          </p>
+          <div role="img" aria-label="Scatter plot of median inference time against checkpoint file size for four YOLOv8 models. The points lie almost exactly on a straight line of slope about 2.07 milliseconds per megabyte with an intercept of about 22 milliseconds, so the line crosses the y axis well above zero.">
+            <div class="chart-container"><canvas id="chartBench"></canvas></div>
+          </div>
+          <p class="method">
+            <strong style="color:var(--text)">Method.</strong>
+            <span id="benchMethod">…</span>
+          </p>
+        </div>
+      </section>
+
+      <!-- ============ USAGE ============ -->
+      <section id="usage" class="reveal" data-reveal>
+        <span class="eyebrow">Usage</span>
+        <h2>Running it</h2>
+
+        <div class="snippet">
+          <div class="snippet-head"><h3>Install</h3><button class="copy-btn" onclick="copySnippet(this)">Copy</button></div>
+          <pre><code>git clone https://github.com/pengzhao-ai/webcam-smartDet.git
+cd webcam-smartDet
+pip install -r requirements.txt
+
+# weights are not committed (the four checkpoints below total ~161 MB)
+# — the default one downloads itself on first run
+python main.py</code></pre>
+        </div>
+
+        <div class="snippet">
+          <div class="snippet-head"><h3>Both detectors on one frame</h3><button class="copy-btn" onclick="copySnippet(this)">Copy</button></div>
+          <pre><code>python examples/combined_detection_demo.py</code></pre>
+        </div>
+
+        <h3 style="font-size:1.125rem;margin:36px 0 12px">Command-line options</h3>
+        <div class="table-scroll card" style="padding:0">
+          <table>
+            <thead><tr><th>Option</th><th>Description</th><th>Default</th></tr></thead>
+            <tbody>
+              <tr><td><code>--camera-id</code></td><td>Camera device ID</td><td class="num">0</td></tr>
+              <tr><td><code>--model-path</code></td><td>Path to YOLO model file</td><td><code>yolov8n.pt</code></td></tr>
+              <tr><td><code>--confidence</code></td><td>Confidence threshold for detections</td><td class="num">0.5</td></tr>
+              <tr><td><code>--save-output</code></td><td>Path to save output video</td><td>None</td></tr>
+              <tr><td><code>--no-display</code></td><td>Run without displaying video window</td><td class="num">False</td></tr>
+              <tr><td><code>--log-level</code></td><td>DEBUG, INFO, WARNING or ERROR</td><td><code>INFO</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="text-secondary" style="max-width:72ch;margin-top:12px">
+          Press <kbd>q</kbd> or <kbd>Esc</kbd> in the video window to quit, or
+          <kbd>Ctrl</kbd>+<kbd>C</kbd> in the terminal. Both routes run the same cleanup.
+        </p>
+
+        <h3 style="font-size:1.125rem;margin:36px 0 12px">The interesting one: trading object rate for frame rate</h3>
+        <p class="text-secondary" style="max-width:72ch;margin-bottom:16px">
+          The combined demo does not run both detectors on every frame. YOLO runs every fifth
+          frame; the cascade runs on all of them. At the 34.2&nbsp;ms measured below, running YOLO
+          on every frame would cap the whole loop at under 30&nbsp;fps before drawing or display
+          got a turn — while the cascade is cheap enough to run every frame without being the
+          bottleneck.
+        </p>
+        <div class="snippet">
+          <div class="snippet-head"><h3>Deliberate asymmetry</h3><button class="copy-btn" onclick="copySnippet(this)">Copy</button></div>
+          <pre><code># Detect objects with YOLO (every 5 frames for performance)
+objects = []
+if frame_count % 5 == 0:
+    objects = object_detector.detect_objects(frame)
+    if objects:
+        frame = object_detector.draw_detections(frame, objects)
+
+# Detect faces (every frame for responsiveness)
+faces = face_detector.detect_faces(frame)
+if faces:
+    frame = face_detector.draw_faces(frame, faces)</code></pre>
+        </div>
+        <p class="text-secondary" style="max-width:72ch">
+          The cost of this choice is visible in the captured frames: object boxes lag the video by
+          up to five frames, so they visibly trail a fast-moving subject, while face boxes track it
+          exactly. That is the trade — a stale object box is worth a responsive window.
+        </p>
+      </section>
+
+      <!-- ============ PERFORMANCE ============ -->
+      <section id="performance" class="reveal" data-reveal>
+        <span class="eyebrow">Performance</span>
+        <h2>The numbers, with the method attached</h2>
+        <p class="text-secondary" style="max-width:72ch;margin-bottom:24px" id="perfIntro">…</p>
+
+        <div class="table-scroll card" style="padding:0">
+          <table>
+            <thead>
+              <tr>
+                <th>Checkpoint</th><th>Size</th><th>Median</th><th>Mean</th>
+                <th>Range</th><th>Inference fps</th><th>Detections per frame</th>
+              </tr>
+            </thead>
+            <tbody id="benchTableBody">
+              <tr><td><code>yolov8n.pt</code></td><td class="num">6.2 MB</td><td class="num">34.23 ms</td><td class="num">34.32 ms</td><td class="num">29.42 – 39.36 ms</td><td class="num">29.2</td><td class="num">2 · 4</td></tr>
+              <tr><td><code>yolov8s.pt</code></td><td class="num">21.5 MB</td><td class="num">68.73 ms</td><td class="num">68.61 ms</td><td class="num">60.64 – 76.95 ms</td><td class="num">14.5</td><td class="num">3 · 5</td></tr>
+              <tr><td><code>yolov8m.pt</code></td><td class="num">49.7 MB</td><td class="num">122.40 ms</td><td class="num">122.72 ms</td><td class="num">108.35 – 139.60 ms</td><td class="num">8.2</td><td class="num">4 · 5</td></tr>
+              <tr><td><code>yolov8l.pt</code></td><td class="num">83.7 MB</td><td class="num">196.20 ms</td><td class="num">196.13 ms</td><td class="num">172.90 – 220.15 ms</td><td class="num">5.1</td><td class="num">3 · 5</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="finding good" style="margin-top:28px">
+          <h3>What these numbers are and are not</h3>
+          <p>
+            They are <strong style="color:var(--text)">inference time only</strong> — the call to
+            <code>detect_objects()</code>, including Ultralytics' preprocessing and non-maximum
+            suppression, measured on CPU with PyTorch pinned to a single thread. They are not the
+            application's frame rate: a real session also pays for camera capture, drawing and
+            display, none of which is in this table. The controller's FPS log and this benchmark
+            measure different things, and the frame rate you see in the window will be lower than
+            the "inference fps" column here.
+          </p>
+        </div>
+      </section>
+
+      <!-- ============ TAKEAWAYS ============ -->
+      <section id="highlights" class="reveal" data-reveal>
+        <span class="eyebrow">Summary</span>
+        <h2>What the design buys</h2>
+        <div class="card">
+          <ul style="list-style:none;display:grid;gap:18px">
+            <li>
+              <strong>A shared result shape makes the detector a choice, not an assumption.</strong>
+              Both detectors return the same four keys, so the render path is written once and the
+              combined demo is a wiring change rather than a second program.
+            </li>
+            <li>
+              <strong>Read hardware state back; never trust a request.</strong>
+              The camera reports what it actually granted, and the video writer is built from that
+              — which is the difference between a playable file and a silently corrupt one.
+            </li>
+            <li>
+              <strong>The measured cost is mostly not the model.</strong>
+              Roughly 22&nbsp;ms of each call is independent of the checkpoint, which is why
+              <code>yolov8n.pt</code> is the default and why shrinking further would buy little.
+            </li>
+            <li>
+              <strong>Know what your detector cannot tell you.</strong>
+              The cascade reports regions, not probabilities, and the toy in the second capture is
+              the demonstration: a plausible-looking box with a number beside it that means
+              nothing about correctness.
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <footer>
+        <p>
+          <strong style="color:var(--text)">Webcam Smart Detection</strong> — GPL-2.0. Source on
+          <a href="https://github.com/pengzhao-ai/webcam-smartDet">GitHub</a>
+          under <a href="https://github.com/pengzhao-ai">pengzhao-ai</a>.
+        </p>
+        <p style="margin-top:10px">
+          Every figure and number on this page was produced by
+          <code>tools/generate_showcase_assets.py</code>, which runs this repository's own
+          detectors; regenerate them with
+          <code>python3 tools/generate_showcase_assets.py</code>. The detection implementation is
+          untouched by the showcase — the page measures it, it does not modify it.
+        </p>
+      </footer>
+
+    </div>
+  </main>
+
+  <script>
+    function toggleMenu() {
+      var d = document.getElementById('vizMenuDropdown');
+      if (d) d.classList.toggle('open');
+    }
+    document.addEventListener('click', function (e) {
+      if (!e.target.closest('.viz-menu')) {
+        var d = document.getElementById('vizMenuDropdown');
+        if (d) d.classList.remove('open');
+      }
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') {
+        var d = document.getElementById('vizMenuDropdown');
+        if (d) d.classList.remove('open');
+      }
+    });
+
+    var savedTheme = null;
+    try { savedTheme = localStorage.getItem('viz-theme'); } catch (err) { savedTheme = null; }
+    var currentTheme = savedTheme || 'light';
+    function applyTheme(t) {
+      // classList, never `className = ...` — assigning the attribute wipes .js and
+      // every other class on the root element.
+      var root = document.documentElement;
+      root.classList.remove('theme-light', 'theme-dark');
+      root.classList.add('theme-' + t);
+      var icon = document.getElementById('themeIcon');
+      var label = document.getElementById('themeLabel');
+      if (icon) icon.textContent = t === 'dark' ? '🌙' : '☀️';
+      if (label) label.textContent = t === 'dark' ? 'Dark' : 'Light';
+      try { localStorage.setItem('viz-theme', t); } catch (err) { /* file:// may block */ }
+      currentTheme = t;
+      if (typeof onThemeChange === 'function') onThemeChange();
+    }
+    function cycleTheme() { applyTheme(currentTheme === 'dark' ? 'light' : 'dark'); }
+    applyTheme(currentTheme);
+
+    // Reveal-on-scroll, with fallbacks so content is never stuck invisible.
+    document.querySelectorAll('[data-reveal]').forEach(function (el) { el.classList.add('reveal'); });
+    var revealTargets = document.querySelectorAll('.reveal');
+    if ('IntersectionObserver' in window) {
+      var revealObserver = new IntersectionObserver(function (entries) {
+        entries.forEach(function (e) {
+          if (e.isIntersecting) { e.target.classList.add('visible'); revealObserver.unobserve(e.target); }
+        });
+      }, { threshold: 0.05 });
+      revealTargets.forEach(function (el) { revealObserver.observe(el); });
+      window.addEventListener('load', function () {
+        setTimeout(function () {
+          revealTargets.forEach(function (el) {
+            if (!el.classList.contains('visible') &&
+                el.getBoundingClientRect().top < window.innerHeight) {
+              el.classList.add('visible');
+            }
+          });
+        }, 300);
+      });
+    } else {
+      revealTargets.forEach(function (el) { el.classList.add('visible'); });
+    }
+
+    function copySnippet(btn) {
+      var snippet = btn.closest('.snippet');
+      var pre = snippet ? snippet.querySelector('pre') : null;
+      if (!pre) return;
+      var original = btn.textContent;
+      var ok = function () {
+        btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = original; }, 1500);
+      };
+      // navigator.clipboard is unavailable on file:// — fall back to selecting the text.
+      var manual = function () {
+        try {
+          var range = document.createRange();
+          range.selectNodeContents(pre);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(range);
+          btn.textContent = 'Press Cmd+C';
+        } catch (err) { btn.textContent = 'Select manually'; }
+        setTimeout(function () { btn.textContent = original; }, 2500);
+      };
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(pre.innerText).then(ok, manual);
+      } else {
+        manual();
+      }
+    }
+
+    var chartInstances = [];
+    function getChartColors() {
+      var s = getComputedStyle(document.documentElement);
+      return {
+        textSecondary: s.getPropertyValue('--text-secondary').trim() || '#64748b',
+        border: s.getPropertyValue('--border').trim() || 'rgba(0,0,0,0.08)',
+        accent: s.getPropertyValue('--accent').trim() || '#2563eb',
+        accentSecondary: s.getPropertyValue('--accent-secondary').trim() || '#7c3aed',
+        negative: s.getPropertyValue('--negative').trim() || '#e11d48',
+        positive: s.getPropertyValue('--positive').trim() || '#059669',
+        warning: s.getPropertyValue('--warning').trim() || '#d97706'
+      };
+    }
+
+    // --text-secondary is a 6-digit hex in both themes, so appending an alpha
+    // pair gives canvas a valid 8-digit colour.
+    function alpha(hex, a) {
+      var digits = Math.round(a * 255).toString(16);
+      if (digits.length < 2) digits = '0' + digits;
+      return hex + digits;
+    }
+
+    function baseOptions(colors, xTitle, yTitle) {
+      return {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        layout: { padding: { top: 8, right: 12, bottom: 4, left: 4 } },
+        plugins: {
+          legend: { display: false },
+          tooltip: { enabled: true, padding: 12, cornerRadius: 8,
+                     titleFont: { size: 13 }, bodyFont: { size: 13 } }
+        },
+        scales: {
+          x: {
+            title: { display: true, text: xTitle, color: colors.textSecondary, font: { size: 12 } },
+            ticks: { color: colors.textSecondary, font: { size: 12 }, maxRotation: 0 },
+            grid: { color: colors.border, drawTicks: false }
+          },
+          y: {
+            title: { display: true, text: yTitle, color: colors.textSecondary, font: { size: 12 } },
+            ticks: { color: colors.textSecondary, font: { size: 12 } },
+            grid: { color: colors.border, drawTicks: false },
+            beginAtZero: true
+          }
+        }
+      };
+    }
+
+    // The prose in the "Method" lines quotes these, so they are read from the
+    // generated payload rather than restated here.
+    function fillMethodLines() {
+      var meta = SHOWCASE_DATA.meta;
+      var ref = SHOWCASE_DATA.cascade_reference;
+      var cascade = document.getElementById('cascadeMethod');
+      if (cascade) {
+        cascade.textContent =
+          SHOWCASE_DATA.cascade_sweep.length + ' measurements: ' +
+          ref.scale_factors.length + ' values of scaleFactor × ' +
+          ref.min_neighbors.length + ' values of minNeighbors, each counting the ' +
+          ref.units + ' by OpenCV’s cascade over one still frame (' + ref.image +
+          ', ' + ref.label.toLowerCase() + '), converted to grayscale first. ' +
+          'The y-axis counts candidate regions, not faces — some of these regions are ' +
+          'not faces, and this measurement cannot tell you which. ' +
+          'The shipped default (' + ref.default_scale_factor + ', ' +
+          ref.default_min_neighbors + ') is the emphasised line.';
+      }
+
+      var bench = document.getElementById('benchMethod');
+      if (bench) {
+        var rows = SHOWCASE_DATA.model_benchmark;
+        bench.textContent =
+          'Median of ' + (rows[0] ? rows[0].n : 0) + ' timings per checkpoint: ' +
+          meta.benchmark_warmup + ' warm-up inferences, then ' +
+          meta.benchmark_repetitions + ' repetitions over the same ' +
+          meta.benchmark_frames + ' fixed frames, timed with perf_counter around ' +
+          'detect_objects() only. ' + meta.machine + ', ' + meta.device + ', ' +
+          'PyTorch pinned to ' + meta.torch_threads + ' thread.';
+      }
+
+      var perf = document.getElementById('perfIntro');
+      if (perf) {
+        var r = SHOWCASE_DATA.model_benchmark;
+        perf.textContent =
+          'Measured on ' + meta.machine + ' on CPU, with PyTorch running ' +
+          meta.torch_threads + ' thread. Each checkpoint saw ' + meta.benchmark_warmup +
+          ' warm-up inferences and then ' + meta.benchmark_repetitions +
+          ' timed passes over the same ' + meta.benchmark_frames +
+          ' frames, giving ' + (r[0] ? r[0].n : 0) +
+          ' timings per model. The median is reported rather than the mean, because a ' +
+          'laptop stalls on the occasional frame and one stalled frame would otherwise ' +
+          'set the headline. Detections are listed per frame, not averaged, because the ' +
+          'two frames differ in how much there is to find.';
+      }
+    }
+
+    var chartsBuilt = false;
+    function destroyCharts() {
+      chartInstances.forEach(function (c) { try { c.destroy(); } catch (err) {} });
+      chartInstances = [];
+      chartsBuilt = false;
+    }
+
+    function buildCharts() {
+      if (chartsBuilt) return;
+      if (typeof Chart === 'undefined' || typeof SHOWCASE_DATA === 'undefined') return;
+      var colors = getChartColors();
+      var made = 0;
+      function make(id, config) {
+        var ctx = document.getElementById(id);
+        if (!ctx) return;
+        chartInstances.push(new Chart(ctx, config));
+        made += 1;
+      }
+
+      // ---- Cascade sweep: pivot the flat 30-cell grid into one line per
+      //      minNeighbors value, x = scaleFactor.
+      var ref = SHOWCASE_DATA.cascade_reference || {};
+      var sweep = SHOWCASE_DATA.cascade_sweep || [];
+      if (sweep.length) {
+        var datasets = [];
+        var ramp = [0.30, 0.45, 1.0, 0.45, 0.30];
+        (ref.min_neighbors || []).forEach(function (mn, i) {
+          var isDefault = mn === ref.default_min_neighbors;
+          var points = sweep
+            .filter(function (r) { return r.min_neighbors === mn; })
+            .sort(function (a, b) { return a.scale_factor - b.scale_factor; })
+            .map(function (r) { return { x: r.scale_factor, y: r.detections }; });
+          datasets.push({
+            label: 'minNeighbors = ' + mn + (isDefault ? '  (shipped)' : ''),
+            data: points,
+            borderColor: isDefault ? colors.accent : alpha(colors.textSecondary, ramp[i] || 0.3),
+            backgroundColor: isDefault ? colors.accent : alpha(colors.textSecondary, ramp[i] || 0.3),
+            borderWidth: isDefault ? 3 : 1.75,
+            tension: 0.15,
+            pointRadius: isDefault ? 5 : 3,
+            pointHoverRadius: 8
+          });
+        });
+
+        var opts = baseOptions(colors, 'scaleFactor (pyramid step)', 'candidate regions returned');
+        opts.plugins.legend = {
+          display: true, position: 'bottom',
+          labels: { color: colors.textSecondary, boxWidth: 14, usePointStyle: true,
+                    padding: 14, font: { size: 12 } }
+        };
+        // A line chart's x scale defaults to 'category', which would stack every
+        // {x, y} point on x=0. scaleFactor is a continuous sweep, so it needs a
+        // linear axis — and one that shows the uneven spacing of the grid.
+        opts.scales.x.type = 'linear';
+        opts.scales.x.ticks.stepSize = 0.05;
+        opts.scales.x.ticks.callback = function (v) { return Number(v).toFixed(2); };
+        opts.scales.y.ticks.stepSize = 1;
+        opts.scales.y.suggestedMax = 3.4;
+        make('chartCascade', {
+          type: 'line',
+          data: { datasets: datasets },
+          options: opts
+        });
+      }
+
+      // ---- Benchmark: median latency against checkpoint size, with the least
+      //      squares line through the four points. The intercept is the finding.
+      var rows = SHOWCASE_DATA.model_benchmark || [];
+      if (rows.length) {
+        var points = rows.map(function (r) {
+          return { x: r.size_mb, y: r.median_ms, model: r.model };
+        });
+        var k = 2.069, c = 22.06;
+        var xs = rows.map(function (r) { return r.size_mb; });
+        var lo = Math.min.apply(null, xs), hi = Math.max.apply(null, xs);
+        var opts2 = baseOptions(colors, 'checkpoint size (MB)', 'median inference (ms)');
+        opts2.plugins.legend = {
+          display: true, position: 'bottom',
+          labels: { color: colors.textSecondary, boxWidth: 14, usePointStyle: true,
+                    padding: 14, font: { size: 12 } }
+        };
+        opts2.plugins.tooltip.callbacks = {
+          label: function (item) {
+            var raw = item.raw || {};
+            var name = raw.model ? raw.model + ' — ' : '';
+            return name + raw.y + ' ms at ' + raw.x + ' MB';
+          }
+        };
+        make('chartBench', {
+          type: 'scatter',
+          data: {
+            datasets: [
+              {
+                label: 'measured (median of 40)',
+                data: points,
+                backgroundColor: colors.accent,
+                borderColor: colors.accent,
+                pointRadius: 6,
+                pointHoverRadius: 9,
+                showLine: false
+              },
+              {
+                label: 'least squares: t = 22.1 + 2.07 × size',
+                data: [{ x: lo, y: c + k * lo }, { x: hi, y: c + k * hi }],
+                borderColor: colors.positive,
+                backgroundColor: colors.positive,
+                borderWidth: 2, borderDash: [7, 5],
+                pointRadius: 0, pointHoverRadius: 0,
+                showLine: true, fill: false
+              }
+            ]
+          },
+          options: opts2
+        });
+      }
+
+      if (made > 0) chartsBuilt = true;
+    }
+
+    // Rebuild on theme change so axis and grid colours follow the palette.
+    function onThemeChange() {
+      if (chartsBuilt) { destroyCharts(); setTimeout(buildCharts, 60); }
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+      if (typeof renderMathInElement === 'function') {
+        renderMathInElement(document.body, {
+          delimiters: [
+            { left: '$$', right: '$$', display: true },
+            { left: '$', right: '$', display: false }
+          ]
+        });
+      }
+      if (typeof SHOWCASE_DATA !== 'undefined') fillMethodLines();
+      buildCharts();
+    });
+    window.addEventListener('load', buildCharts);
+  </script>
+</body>
+</html>
