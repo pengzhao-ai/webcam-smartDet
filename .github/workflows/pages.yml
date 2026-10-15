@@ -1,0 +1,58 @@
+# Drop this in at .github/workflows/pages.yml
+#
+# Before the first run, enable Pages: Settings -> Pages -> Source: "GitHub Actions".
+# Press NOTHING else — the starter-template box on that screen has a "Configure"
+# button that commits a competing workflow deploying the repo root.
+#
+# Enable Pages BEFORE merging this, or the first run fires against a disabled
+# site and fails at the configure/deploy step.
+#
+# Also commit an empty docs/.nojekyll so Jekyll does not process your assets.
+#
+# This workflow deploys `docs/` as a project site, served from
+# https://<owner>.github.io/<repo>/. Everything in docs/index.html must
+# therefore reference assets relatively (assets/x.png), never from the root
+# (/assets/x.png). There is no configuration that changes this.
+
+name: Deploy Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let an in-flight deploy finish rather than cancelling it; a half-cancelled
+# Pages deploy can leave the site serving the previous artifact.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
