@@ -94,8 +94,6 @@ which is exactly the unreliable source it exists to warn about.
   the repo root**, so `compare_all_models()` reports "not found" for every model.
 - Weights are gitignored (`*.pt`); ultralytics re-downloads on first use, so a fresh clone
   works but the first run is slow.
-- **Stray duplicates in the repo root** (`compare_versions.py`, `demo_tools.py`,
-  `show_usage.py`, `simple_demo.py`). The tracked copies live in `examples/`.
 - Running the app needs a real camera. The detectors do not — for headless work call
   `detect_objects` / `detect_faces` on a still image directly, which is what the asset
   generator does.
