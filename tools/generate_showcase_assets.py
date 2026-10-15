@@ -122,6 +122,83 @@ def build_benchmark_record(
     return record
 
 
+def fit_least_squares(xs: List[float], ys: List[float]) -> Optional[Dict[str, float]]:
+    """Fit ``y = slope * x + intercept`` by ordinary least squares.
+
+    The benchmark chart draws this line, so the coefficients are emitted with the
+    data rather than written into the page: a hardcoded fit keeps drawing its old
+    line after the measurements move, and a dashed trend line that no longer fits
+    its points looks exactly like one that does.
+
+    Returns unrounded values — formatting is the page's concern. Returns None when
+    there is nothing to estimate: fewer than two points, or no spread on x. The
+    page then omits the line instead of drawing a flat one, which would read as a
+    finding rather than as the absence of one.
+    """
+    if len(xs) < 2 or len(xs) != len(ys):
+        return None
+
+    mean_x = statistics.fmean(xs)
+    mean_y = statistics.fmean(ys)
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    if sxx == 0:
+        return None
+
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / sxx
+    intercept = mean_y - slope * mean_x
+
+    ss_tot = sum((y - mean_y) ** 2 for y in ys)
+    ss_res = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
+    # A perfect fit has ss_res 0 and ss_tot > 0; a constant y has ss_tot 0 and no
+    # variance to explain, which counts as fully explained.
+    r2 = 1.0 - ss_res / ss_tot if ss_tot else 1.0
+
+    return {"slope": slope, "intercept": intercept, "r2": r2}
+
+
+def round_fit(fit: Optional[Dict[str, float]]) -> Optional[Dict[str, float]]:
+    """Round a fit for emission, passing None through untouched."""
+    if fit is None:
+        return None
+    return {
+        "slope": round(fit["slope"], 3),
+        "intercept": round(fit["intercept"], 3),
+        "r2": round(fit["r2"], 4),
+    }
+
+
+def resolve_benchmark(
+    fresh: List[Dict[str, Any]], previous: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Pick this run's timings, falling back to the previous run's.
+
+    ``--skip-benchmark`` exists so figures can be regenerated without spending
+    minutes re-timing the models. It must not take the timings with it: writing an
+    empty benchmark blanks the chart the reader came for.
+    """
+    return list(fresh) if fresh else list(previous)
+
+
+def load_existing_data(path: str) -> Dict[str, Any]:
+    """Read back a previously generated data.js, for ``--skip-benchmark`` runs."""
+    if not os.path.exists(path):
+        return {}
+
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+
+    prefix = "var SHOWCASE_DATA = "
+    if not text.startswith(prefix):
+        logger.warning("existing data file has an unexpected shape; ignoring it")
+        return {}
+
+    try:
+        return json.loads(text[len(prefix) :].strip().rstrip(";"))
+    except json.JSONDecodeError:
+        logger.warning("could not parse the existing data file; ignoring it")
+        return {}
+
+
 def describe_machine() -> str:
     """Name the CPU as a reader would recognise it.
 
@@ -365,6 +442,14 @@ def build_data(
             "units": "candidate regions returned",
         },
         "model_benchmark": benchmark,
+        # Emitted, not hardcoded in the page: see fit_least_squares. rounded here
+        # because this is the display boundary.
+        "benchmark_fit": round_fit(
+            fit_least_squares(
+                [record["size_mb"] for record in benchmark],
+                [record["median_ms"] for record in benchmark],
+            )
+        ),
         "detector_contract": {
             "keys": ["bbox", "confidence", "class_id", "class_name"],
         },
@@ -402,7 +487,10 @@ def main() -> int:
     parser.add_argument(
         "--skip-benchmark",
         action="store_true",
-        help="regenerate figures only; the model sweep takes a few minutes",
+        help=(
+            "regenerate figures and charts using the timings already in docs/assets/data.js; "
+            "the model sweep takes a few minutes"
+        ),
     )
     args = parser.parse_args()
 
@@ -475,15 +563,26 @@ def main() -> int:
     cascade_sweep = run_cascade_sweep(face_detector)
     logger.info("cascade sweep: %d cells", len(cascade_sweep))
 
+    data_path = os.path.join(DOCS_ASSETS, "data.js")
     benchmark: List[Dict[str, Any]] = []
     if args.skip_benchmark:
-        logger.info("benchmark skipped (--skip-benchmark)")
+        # Carry the previous timings forward rather than writing an empty list:
+        # this flag is for regenerating figures quickly, not for discarding the
+        # measurements those figures describe.
+        previous = load_existing_data(data_path).get("model_benchmark", [])
+        benchmark = resolve_benchmark([], previous)
+        if benchmark:
+            logger.info("benchmark preserved from the existing data file (%d models)", len(benchmark))
+        else:
+            logger.warning(
+                "--skip-benchmark given but no usable data file to preserve timings from; "
+                "the benchmark chart will be empty"
+            )
     else:
         benchmark = run_model_benchmark(ObjectDetector, benchmark_frames)
 
     data = build_data(cascade_sweep, benchmark, face_detector, object_detector, benchmark_frames)
 
-    data_path = os.path.join(DOCS_ASSETS, "data.js")
     with open(data_path, "w", encoding="utf-8") as handle:
         handle.write(to_data_js(data))
     logger.info("wrote %s", os.path.relpath(data_path, REPO_ROOT))

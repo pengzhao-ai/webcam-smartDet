@@ -179,6 +179,85 @@ class TestDataJsEmission(unittest.TestCase):
         self.assertNotIn("</script>", text)
 
 
+class TestLeastSquares(unittest.TestCase):
+    """The benchmark chart draws a fitted trend line, so the coefficients it draws
+    must come from the data. Hardcoding them in the page lets the line drift away
+    from the points the moment the benchmark is regenerated on another machine —
+    and a dashed line that no longer fits is indistinguishable from one that does.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.gen = load_generator()
+
+    def test_recovers_a_line_it_was_given_exactly(self):
+        xs = [6.2, 21.5, 49.7, 83.7]
+        ys = [22.06 + 2.07 * x for x in xs]
+
+        fit = self.gen.fit_least_squares(xs, ys)
+
+        self.assertAlmostEqual(fit["slope"], 2.07, places=6)
+        self.assertAlmostEqual(fit["intercept"], 22.06, places=6)
+        self.assertAlmostEqual(fit["r2"], 1.0, places=9)
+
+    def test_matches_a_hand_computed_fit(self):
+        """x=[1,2,3], y=[1,2,4]: slope 1.5, intercept -2/3, r^2 27/28."""
+        fit = self.gen.fit_least_squares([1.0, 2.0, 3.0], [1.0, 2.0, 4.0])
+
+        self.assertAlmostEqual(fit["slope"], 1.5, places=9)
+        self.assertAlmostEqual(fit["intercept"], -2.0 / 3.0, places=9)
+        self.assertAlmostEqual(fit["r2"], 27.0 / 28.0, places=9)
+
+    def test_r2_falls_between_zero_and_one_for_noisy_input(self):
+        fit = self.gen.fit_least_squares([1.0, 2.0, 3.0, 4.0], [1.0, 4.0, 2.0, 9.0])
+
+        self.assertGreater(fit["r2"], 0.0)
+        self.assertLess(fit["r2"], 1.0)
+
+    def test_refuses_a_degenerate_axis_rather_than_dividing_by_zero(self):
+        """One checkpoint, or several of the same size, has no slope to estimate."""
+        self.assertIsNone(self.gen.fit_least_squares([5.0, 5.0, 5.0], [1.0, 2.0, 3.0]))
+        self.assertIsNone(self.gen.fit_least_squares([1.0], [1.0]))
+        self.assertIsNone(self.gen.fit_least_squares([], []))
+
+    def test_display_rounding_leaves_a_missing_fit_alone(self):
+        """None means "no line to draw" and must survive to the JSON as null."""
+        self.assertIsNone(self.gen.round_fit(None))
+
+    def test_display_rounding_keeps_enough_precision_for_the_drawn_line(self):
+        fit = self.gen.round_fit(
+            {"slope": 2.0694321, "intercept": 22.0604321, "r2": 0.99991234}
+        )
+
+        self.assertEqual(fit["slope"], 2.069)
+        self.assertEqual(fit["intercept"], 22.06)
+        self.assertEqual(fit["r2"], 0.9999)
+
+
+class TestBenchmarkPreservation(unittest.TestCase):
+    """`--skip-benchmark` exists so figures can be regenerated without a few minutes
+    of timing. It must not take the timings with it: writing an empty benchmark
+    blanks the chart the reader came for.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.gen = load_generator()
+
+    def test_fresh_results_win_when_this_run_produced_them(self):
+        fresh = [{"model": "yolov8n.pt", "median_ms": 1.0}]
+
+        self.assertEqual(self.gen.resolve_benchmark(fresh, [{"model": "stale"}]), fresh)
+
+    def test_previous_results_survive_a_skipped_run(self):
+        previous = [{"model": "yolov8n.pt", "median_ms": 34.23}]
+
+        self.assertEqual(self.gen.resolve_benchmark([], previous), previous)
+
+    def test_both_empty_is_an_empty_benchmark_not_an_error(self):
+        self.assertEqual(self.gen.resolve_benchmark([], []), [])
+
+
 class TestCascadeReference(unittest.TestCase):
     """The chart marks where the shipped defaults sit, so that marker must be real.
 

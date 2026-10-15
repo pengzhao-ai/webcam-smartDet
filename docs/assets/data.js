@@ -264,6 +264,11 @@ var SHOWCASE_DATA = {
       "fps": 5.1
     }
   ],
+  "benchmark_fit": {
+    "slope": 2.069,
+    "intercept": 22.063,
+    "r2": 0.9992
+  },
   "detector_contract": {
     "keys": [
       "bbox",

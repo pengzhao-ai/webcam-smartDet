@@ -1161,13 +1161,11 @@ if faces:
       // ---- Benchmark: median latency against checkpoint size, with the least
       //      squares line through the four points. The intercept is the finding.
       var rows = SHOWCASE_DATA.model_benchmark || [];
+      var fit = SHOWCASE_DATA.benchmark_fit;
       if (rows.length) {
         var points = rows.map(function (r) {
           return { x: r.size_mb, y: r.median_ms, model: r.model };
         });
-        var k = 2.069, c = 22.06;
-        var xs = rows.map(function (r) { return r.size_mb; });
-        var lo = Math.min.apply(null, xs), hi = Math.max.apply(null, xs);
         var opts2 = baseOptions(colors, 'checkpoint size (MB)', 'median inference (ms)');
         opts2.plugins.legend = {
           display: true, position: 'bottom',
@@ -1181,30 +1179,43 @@ if faces:
             return name + raw.y + ' ms at ' + raw.x + ' MB';
           }
         };
+        var datasets = [
+          {
+            label: 'measured (median of 40)',
+            data: points,
+            backgroundColor: colors.accent,
+            borderColor: colors.accent,
+            pointRadius: 6,
+            pointHoverRadius: 9,
+            showLine: false
+          }
+        ];
+
+        // The coefficients come from the generator, never from this file. A fit
+        // hardcoded here keeps drawing its old line after the measurements move,
+        // and a dashed trend line that no longer fits its points looks exactly
+        // like one that does. Absent a fit, no line is drawn at all.
+        if (fit) {
+          var xs = rows.map(function (r) { return r.size_mb; });
+          var lo = Math.min.apply(null, xs), hi = Math.max.apply(null, xs);
+          datasets.push({
+            label: 'least squares: t = ' + fit.intercept.toFixed(1) + ' + ' +
+                   fit.slope.toFixed(2) + ' × size',
+            data: [
+              { x: lo, y: fit.intercept + fit.slope * lo },
+              { x: hi, y: fit.intercept + fit.slope * hi }
+            ],
+            borderColor: colors.positive,
+            backgroundColor: colors.positive,
+            borderWidth: 2, borderDash: [7, 5],
+            pointRadius: 0, pointHoverRadius: 0,
+            showLine: true, fill: false
+          });
+        }
+
         make('chartBench', {
           type: 'scatter',
-          data: {
-            datasets: [
-              {
-                label: 'measured (median of 40)',
-                data: points,
-                backgroundColor: colors.accent,
-                borderColor: colors.accent,
-                pointRadius: 6,
-                pointHoverRadius: 9,
-                showLine: false
-              },
-              {
-                label: 'least squares: t = 22.1 + 2.07 × size',
-                data: [{ x: lo, y: c + k * lo }, { x: hi, y: c + k * hi }],
-                borderColor: colors.positive,
-                backgroundColor: colors.positive,
-                borderWidth: 2, borderDash: [7, 5],
-                pointRadius: 0, pointHoverRadius: 0,
-                showLine: true, fill: false
-              }
-            ]
-          },
+          data: { datasets: datasets },
           options: opts2
         });
       }
